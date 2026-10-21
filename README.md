@@ -22,7 +22,7 @@
 | 단계 | 내용 |
 |---|---|
 | 헤더 스캔 | 모든 파일의 헤더만 읽습니다(영상 데이터는 읽지 않음). |
-| 후보 선정 | SOP Class가 Secondary Capture·PDF·SR·파형·DICOMDIR인 파일, 또는 헤더 단서(Modality OT·SC·EK·US 등, CT·MR 컬러 영상, ImageType SECONDARY, BurnedInAnnotation=YES, 오버레이, 시리즈 번호 900 이상, 영상 5장 이하 시리즈)가 있는 파일 |
+| 후보 선정 | SOP Class가 Secondary Capture·PDF·SR·파형·DICOMDIR인 파일, 또는 Modality가 OT·SC·EK·ECG·DOC·US·XC이거나 BurnedInAnnotation=YES·오버레이가 있는 파일. 일반 CT·MR 영상과 재구성 영상은 OCR하지 않음 |
 | OCR | 후보 파일만 글자 인식(영어·한글). 1차는 원래 크기, 필요할 때만 2배 확대해 재검사 |
 | 판정 | Name·Patient ID·Birth·성명·등록번호 같은 항목 이름 발견 → **유력**, 글씨만 있음 → **확인 필요**, 글씨 없음 → **정상** |
 | 비식별화 | '업로드'로 정한 파일의 30개 태그 값을 같은 길이의 공백으로 덮어씀(시퀀스 안쪽 포함). 영상 데이터와 나머지 부분은 바이트 단위로 그대로 |

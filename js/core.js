@@ -27,8 +27,6 @@
   ];
   // 헤더 단서로 볼 Modality
   const CLUE_MODALITIES = new Set(["OT", "SC", "DOC", "SR", "ECG", "EK", "US", "XC", "SMR"]);
-  const SMALL_SERIES_MAX = 5;
-  const HIGH_SERIES_NUMBER = 900;
 
   // ---------- 헤더 ----------
 
@@ -140,30 +138,20 @@
    * group: "primary"(보고서형 SOP) | "clue"(헤더 단서) | "none"
    */
   function classifyAll(headers) {
-    const seriesCount = new Map();
-    for (const h of headers) {
-      if (h && h.ok) seriesCount.set(h.seriesUID, (seriesCount.get(h.seriesUID) || 0) + 1);
-    }
-    return headers.map(h => classify(h, h && h.ok ? seriesCount.get(h.seriesUID) : 0));
+    return headers.map(h => classify(h));
   }
 
-  function classify(h, nInSeries) {
+  // 후보는 최소로 잡는다: 일반 CT·MR 영상과 재구성 영상(MPR, MIP, 3D 등)은 OCR하지 않는다.
+  // (ImageType SECONDARY, 큰 시리즈 번호, 장수가 적은 시리즈, 컬러 영상은 정상 재구성 영상도 해당되어 기준에서 뺐다)
+  function classify(h) {
     if (!h || !h.ok) return { group: "unreadable", reasons: ["DICOM 아님/읽기 실패"] };
     const reasons = [];
     const label = sopLabel(h.sopClassUID);
     if (label) reasons.push(`SOP Class: ${label}`);
     const clue = [];
     if (CLUE_MODALITIES.has(h.modality)) clue.push(`Modality=${h.modality}`);
-    const color = h.samplesPerPixel === 3 || /^(RGB|YBR)/.test(h.photometric);
-    if ((h.modality === "CT" || h.modality === "MR") && color) clue.push("CT/MR인데 컬러 영상");
-    if (h.imageType.includes("SECONDARY")) clue.push("ImageType SECONDARY");
     if (h.burnedIn === "YES") clue.push("BurnedInAnnotation=YES");
     if (h.hasOverlay) clue.push("오버레이(6000~60FF) 있음");
-    const sn = parseInt(h.seriesNumber, 10);
-    if (!isNaN(sn) && sn >= HIGH_SERIES_NUMBER) clue.push(`시리즈 번호 ${sn}`);
-    if (nInSeries > 0 && nInSeries <= SMALL_SERIES_MAX && !h.imageType.includes("LOCALIZER")) {
-      clue.push(`영상 ${nInSeries}장뿐인 시리즈`);
-    }
     reasons.push(...clue);
     if (!h.hasPreamble) reasons.push("DICM 표시 없음");
     const group = label ? "primary" : clue.length ? "clue" : "none";

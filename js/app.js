@@ -4,11 +4,14 @@
   const $ = id => document.getElementById(id);
   const HEADER_BYTES = 64 * 1024;
   const SCAN_CONCURRENCY = 16;
-  const OCR_WORKERS = 2;
-  const OCR_BATCH = 4;
+  // OCR 작업 수: CPU 코어가 적은 PC(VMware 등)에서는 1개만 써서 화면이 멈추지 않게 한다
+  const CPU_CORES = navigator.hardwareConcurrency || 2;
+  const OCR_WORKERS = CPU_CORES <= 4 ? 1 : 2;
+  const OCR_BATCH = OCR_WORKERS * 2;
   const VERDICT_CLASS = { "유력": "v-strong", "확인 필요": "v-warn", "정상": "v-ok" };
 
   let entries = [];      // [{file, rel}]
+  let perf = null;       // 마지막 점검의 성능 기록
   let results = [];      // 파일별 결과
   let filter = "전체";
 
@@ -338,9 +341,15 @@
     const total = (performance.now() - t0) / 1000;
     const tOcr = (performance.now() - tOcr0) / 1000 - engineSeconds;
     const twoPass = count(r => r.ocrPasses === 2);
-    progress(1, `완료 · 헤더 스캔 ${tScan.toFixed(1)}초` +
-      (queue.length ? ` · OCR 엔진 준비 ${engineSeconds.toFixed(1)}초 · 후보 ${queue.length}장 OCR ${tOcr.toFixed(1)}초 (2배 확대 재검사 ${twoPass}장)` : "") +
-      ` · 전체 ${total.toFixed(1)}초`);
+    // 성능 기록 (VMware 등 실제 환경 테스트용)
+    perf = {
+      files: results.length, cores: CPU_CORES, workers: OCR_WORKERS, ocrCount: queue.length, twoPass,
+      scanSec: tScan, engineSec: engineSeconds, ocrSec: Math.max(0, tOcr), totalSec: total,
+    };
+    progress(1, `완료 · 파일 ${results.length.toLocaleString()}개 · 헤더 스캔 ${tScan.toFixed(1)}초` +
+      (queue.length ? ` · OCR 후보 ${queue.length}장 ${perf.ocrSec.toFixed(1)}초 (장당 ${(perf.ocrSec / queue.length).toFixed(1)}초, 2배 확대 재검사 ${twoPass}장)` +
+        ` · OCR 엔진 준비 ${engineSeconds.toFixed(1)}초` : " · OCR 후보 없음") +
+      ` · 전체 ${total.toFixed(1)}초 · CPU ${CPU_CORES}코어, OCR 작업 ${OCR_WORKERS}개`);
     renderSummary();
     renderReview();
     $("step-save").classList.remove("hidden");
@@ -612,12 +621,18 @@
 
   $("dl-files").addEventListener("click", () => {
     const rows = [["파일", "최종 결정", "후보 구분", "이유", "OCR 판정", "발견한 항목 이름", "OCR 비고",
-      "SOP Class", "Modality", "ImageType", "시리즈 번호", "시리즈 설명", "DICM 표시", "비식별화"]];
+      "SOP Class", "Modality", "ImageType", "시리즈 번호", "시리즈 설명", "DICM 표시", "비식별화", "OCR 시간(초)"]];
     for (const r of results) {
       const h = r.h || {};
       rows.push([r.rel, r.decision, r.group, r.reasons.join("; "), r.verdict, r.labels.join("; "), r.ocrNote,
         sopName(h), h.modality, (h.imageType || []).join("\\"), h.seriesNumber, h.seriesDescription,
-        h.ok ? (h.hasPreamble ? "있음" : "없음") : "", r.anon || ""]);
+        h.ok ? (h.hasPreamble ? "있음" : "없음") : "", r.anon || "", r.ocrSeconds ? r.ocrSeconds.toFixed(2) : ""]);
+    }
+    if (perf) {
+      rows.push([]);
+      rows.push(["# 성능 기록", `파일 ${perf.files}개`, `CPU ${perf.cores}코어`, `OCR 작업 ${perf.workers}개`,
+        `OCR 후보 ${perf.ocrCount}장`, `2배 확대 재검사 ${perf.twoPass}장`, `헤더 스캔 ${perf.scanSec.toFixed(1)}초`,
+        `OCR 엔진 준비 ${perf.engineSec.toFixed(1)}초`, `OCR ${perf.ocrSec.toFixed(1)}초`, `전체 ${perf.totalSec.toFixed(1)}초`]);
     }
     download(`precheck_files_${stamp()}.csv`, csv(rows));
   });
