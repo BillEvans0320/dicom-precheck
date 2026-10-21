@@ -1,0 +1,7 @@
+.DS_Store
+# 환자 영상·결과물이 실수로 올라가지 않도록
+*.dcm
+*.DCM
+*.zip
+Data/
+node_modules/

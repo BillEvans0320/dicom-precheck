@@ -1,0 +1,67 @@
+:root {
+  --bg: #f6f7f9; --card: #ffffff; --text: #1d232b; --muted: #5f6b7a; --border: #dde2e8;
+  --accent: #1f6feb; --strong: #c62828; --warn: #b26a00; --ok: #2e7d32; --chip: #eef1f5;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12161b; --card: #1b2128; --text: #e4e8ed; --muted: #9aa5b1; --border: #2c343e;
+    --accent: #4c8dff; --strong: #ef5350; --warn: #ffb74d; --ok: #66bb6a; --chip: #252d36;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+}
+header, main, footer { max-width: 1100px; margin: 0 auto; padding: 0 16px; }
+header { padding-top: 24px; }
+h1 { margin: 0 0 4px; font-size: 24px; }
+h2 { margin: 0 0 12px; font-size: 18px; }
+.sub, .muted { color: var(--muted); }
+.notice { border-left: 4px solid var(--accent); background: var(--card); padding: 10px 14px; margin: 16px 0; border-radius: 6px; }
+.notice p { margin: 4px 0; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 18px; margin: 16px 0; }
+.hidden { display: none; }
+.drop { border: 2px dashed var(--border); border-radius: 10px; padding: 20px; text-align: center; }
+.drop.over { border-color: var(--accent); }
+.row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; align-items: center; }
+.option { display: block; margin-top: 12px; color: var(--muted); }
+button, .button {
+  font: inherit; padding: 7px 14px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--chip); color: var(--text); cursor: pointer; display: inline-block;
+}
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+button.active { outline: 2px solid var(--accent); }
+.progress { height: 10px; background: var(--chip); border-radius: 5px; overflow: hidden; }
+#bar, #save-bar { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+#save-progress { margin-top: 12px; }
+.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-top: 12px; }
+.stat { background: var(--chip); border-radius: 8px; padding: 10px; }
+.stat b { display: block; font-size: 20px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; margin-top: 12px; }
+.item { border: 1px solid var(--border); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+.item canvas, .item .noimg { width: 100%; aspect-ratio: 1; background: #000; border-radius: 4px; object-fit: contain; }
+.item .noimg { display: flex; align-items: center; justify-content: center; color: #aaa; font-size: 13px; padding: 8px; text-align: center; }
+.item .path { font-size: 12px; word-break: break-all; color: var(--muted); }
+.item .reasons { font-size: 12px; }
+.badge { font-weight: 700; }
+.badge.v-strong { color: var(--strong); }
+.badge.v-warn { color: var(--warn); }
+.badge.v-ok { color: var(--ok); }
+.decide { display: flex; gap: 12px; font-size: 14px; }
+.item.excluded { border-color: var(--strong); }
+table { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 8px; }
+td, th { border-bottom: 1px solid var(--border); padding: 4px 6px; text-align: left; word-break: break-all; }
+footer { color: var(--muted); font-size: 12px; padding-bottom: 24px; }
+.row.center { justify-content: center; }
+.hint { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
+.guide { margin: 8px 0 4px; padding-left: 20px; font-size: 14px; }
+.guide li { margin: 4px 0; }
+.howto { background: var(--chip); border-radius: 8px; padding: 10px 14px; margin: 10px 0; font-size: 14px; }
+.howto ol { margin: 6px 0 0; padding-left: 20px; }
+.howto li { margin: 3px 0; }
+.result { border: 2px solid var(--ok); border-radius: 8px; padding: 10px 14px; margin-top: 12px; }
+.result p { margin: 6px 0; }
+.result-title { font-weight: 700; color: var(--ok); font-size: 16px; }
+.result code { word-break: break-all; }
