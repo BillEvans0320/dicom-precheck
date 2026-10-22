@@ -9,7 +9,7 @@
   const OCR_WORKERS = CPU_CORES <= 4 ? 1 : 2;
   const OCR_BATCH = OCR_WORKERS * 2;
   const VERDICT_CLASS = { "유력": "v-strong", "확인 필요": "v-warn", "정상": "v-ok" };
-  // 시리즈 표본 검사: 시리즈마다 3장(첫·가운데·마지막)만 먼저 OCR하고,
+  // 시리즈 대표 판정: 시리즈마다 대표 3장(첫·가운데·마지막)만 먼저 OCR하고,
   // 하나라도 정상이 아니거나 3장의 단어 수가 이만큼 이상 차이 나면 시리즈 전체를 OCR한다
   const SAMPLE_WORD_GAP = 10;
   // 2배 확대 재검사: 1차(원래 크기)에서 신뢰 단어가 이만큼 이상 읽혔는데 항목 이름이 없을 때만 (작은 글씨 리포트용).
@@ -333,6 +333,14 @@
     }
   }
 
+  function inTab(r, f) {
+    const c = category(r);
+    if (!c) return false;
+    if (f === "전체") return true;
+    if (f === REVIEW_TAB) return c === CAT_STRONG || c === CAT_REVIEW;
+    return c === f;
+  }
+
   function category(r) {
     if (r.verdict === "유력") return CAT_STRONG;
     if (r.verdict === "확인 필요") return r.jlk ? CAT_JLK : CAT_REVIEW;
@@ -374,7 +382,7 @@
       }
     }
 
-    // 3) 후보 OCR: 시리즈 표본 검사
+    // 3) 후보 OCR: 시리즈 대표 3장으로 판정
     const cands = results.filter(r => r.group === "primary" || r.group === "clue" || r.group === "sample");
     const bySeries = new Map();
     for (const r of cands) {
@@ -392,7 +400,7 @@
       samples.push(...samp);
     }
     const tOcr0 = performance.now();
-    await runOcr(samples, "표본 OCR 검사 중 (시리즈마다 최대 3장)", 0.3, 0.6);
+    await runOcr(samples, "시리즈 대표 영상 OCR 중 (시리즈마다 최대 3장)", 0.3, 0.6);
     const fullQueue = [];
     let fullSeries = 0;
     for (const s of seriesList) {
@@ -403,13 +411,13 @@
       const gap = wcs.length > 1 ? Math.max(...wcs) - Math.min(...wcs) : 0;
       if (found || gap >= SAMPLE_WORD_GAP) {
         fullSeries++;
-        const why = found ? "표본에서 발견되어 시리즈 전체 검사" : "표본의 글자 양이 달라 시리즈 전체 검사";
+        const why = found ? "대표 영상에서 발견되어 시리즈 전체 검사" : "대표 영상끼리 글자 양이 달라 시리즈 전체 검사";
         for (const r of rest) { r.seriesNote = why; fullQueue.push(r); }
         for (const r of s.samp) r.seriesNote = why;
       } else {
         for (const r of rest) {
           r.verdict = "정상"; r.labels = []; r.skipped = true;
-          r.ocrNote = "표본 검사로 정상 (같은 시리즈 3장 확인, OCR 생략)";
+          r.ocrNote = "같은 시리즈 대표 3장이 모두 정상이라 정상으로 판정";
         }
       }
     }
@@ -439,7 +447,7 @@
       scanSec: tScan, engineSec: engineSeconds, ocrSec: Math.max(0, tOcr), totalSec: total,
     };
     progress(1, `완료 · 파일 ${results.length.toLocaleString()}개 · 헤더 스캔 ${tScan.toFixed(1)}초` +
-      (cands.length ? ` · 후보 ${cands.length.toLocaleString()}장(시리즈 ${seriesList.length}개) 중 OCR ${ocrCount}장, 표본 검사로 생략 ${skipped.toLocaleString()}장` +
+      (cands.length ? ` · 후보 ${cands.length.toLocaleString()}장(시리즈 ${seriesList.length}개) 중 OCR ${ocrCount}장, 나머지 ${skipped.toLocaleString()}장은 같은 시리즈 대표 3장의 결과로 판정` +
         ` (전체 검사 시리즈 ${fullSeries}개) · OCR ${perf.ocrSec.toFixed(1)}초 (장당 ${ocrCount ? (perf.ocrSec / ocrCount).toFixed(1) : 0}초, 2배 확대 재검사 ${twoPass}장)` +
         ` · OCR 엔진 준비 ${engineSeconds.toFixed(1)}초` : " · OCR 후보 없음") +
       ` · 전체 ${total.toFixed(1)}초 · CPU ${CPU_CORES}코어, OCR 작업 ${OCR_WORKERS}개`);
@@ -583,7 +591,7 @@
     const stats = [
       ["전체 파일", results.length],
       ["OCR 검사", count(r => r.sampled)],
-      ["표본 검사로 생략", count(r => r.skipped)],
+      ["시리즈 대표로 판정", count(r => r.skipped)],
       ["유력", count(r => category(r) === CAT_STRONG)],
       ["확인 필요 – 그 외", count(r => category(r) === CAT_REVIEW)],
       ["확인 필요 – JLK", count(r => category(r) === CAT_JLK)],
@@ -606,13 +614,6 @@
     $("step-review").classList.remove("hidden");
     const fbox = $("filters");
     fbox.textContent = "";
-    const inTab = (r, f) => {
-      const c = category(r);
-      if (!c) return false;
-      if (f === "전체") return true;
-      if (f === REVIEW_TAB) return c === CAT_STRONG || c === CAT_REVIEW;
-      return c === f;
-    };
     for (const f of [REVIEW_TAB, CAT_STRONG, CAT_REVIEW, CAT_JLK, CAT_OK, "전체"]) {
       const b = document.createElement("button");
       b.textContent = `${f} (${count(r => inTab(r, f)).toLocaleString()})`;
@@ -620,10 +621,11 @@
       b.addEventListener("click", () => { filter = f; renderReview(); });
       fbox.append(b);
     }
-    // JLK 탭: 일괄 제외 / 일괄 업로드
-    const bulk = $("jlk-bulk");
-    bulk.classList.toggle("hidden", filter !== CAT_JLK || !count(r => category(r) === CAT_JLK));
-    $("jlk-count").textContent = count(r => category(r) === CAT_JLK && r.decision === "제외").toLocaleString();
+    // 탭 일괄 제외 / 일괄 업로드
+    const inThis = count(r => inTab(r, filter));
+    $("tab-bulk").classList.toggle("hidden", !inThis);
+    $("tab-count").textContent =
+      `이 탭 ${inThis.toLocaleString()}개 중 제외 ${count(r => inTab(r, filter) && r.decision === "제외").toLocaleString()}개`;
 
     const grid = $("grid");
     grid.textContent = "";
@@ -681,13 +683,18 @@
     return d;
   }
 
-  function setJlk(decision) {
-    for (const r of results) if (category(r) === CAT_JLK) r.decision = decision;
+  // 지금 보고 있는 탭의 파일을 한 번에 제외/업로드. 유력 파일을 업로드로 바꿀 때는 한 번 더 묻는다
+  function setTab(decision) {
+    const targets = results.filter(r => inTab(r, filter));
+    const strong = targets.filter(r => category(r) === CAT_STRONG).length;
+    if (decision === "업로드" && strong &&
+        !confirm(`이 탭에는 '유력' 파일 ${strong}개가 있습니다. 이미지에 환자정보가 보일 수 있습니다.\n모두 업로드로 바꿀까요?`)) return;
+    for (const r of targets) r.decision = decision;
     renderSummary();
     renderReview();
   }
-  $("jlk-exclude").addEventListener("click", () => setJlk("제외"));
-  $("jlk-upload").addEventListener("click", () => setJlk("업로드"));
+  $("tab-exclude").addEventListener("click", () => setTab("제외"));
+  $("tab-upload").addEventListener("click", () => setTab("업로드"));
 
   function renderOthers() {
     const box = $("others");
@@ -747,7 +754,7 @@
     if (perf) {
       rows.push([]);
       rows.push(["# 성능 기록", `파일 ${perf.files}개`, `CPU ${perf.cores}코어`, `OCR 작업 ${perf.workers}개`,
-        `후보 ${perf.candidates}장(시리즈 ${perf.series}개)`, `OCR ${perf.ocrCount}장`, `표본 검사로 생략 ${perf.skipped}장`,
+        `후보 ${perf.candidates}장(시리즈 ${perf.series}개)`, `OCR ${perf.ocrCount}장`, `시리즈 대표로 판정 ${perf.skipped}장`,
         `전체 검사 시리즈 ${perf.fullSeries}개`, `2배 확대 재검사 ${perf.twoPass}장`, `헤더 스캔 ${perf.scanSec.toFixed(1)}초`,
         `OCR 엔진 준비 ${perf.engineSec.toFixed(1)}초`, `OCR ${perf.ocrSec.toFixed(1)}초`, `전체 ${perf.totalSec.toFixed(1)}초`]);
     }
