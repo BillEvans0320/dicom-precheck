@@ -18,13 +18,14 @@
   // 긴 변(가로·세로 중 큰 쪽)이 이보다 큰 이미지는 글씨도 충분히 커서 2배 확대를 하지 않는다
   // (큰 리포트 화면의 확대는 시간만 많이 듦)
   const UPSCALE_MAX_SIDE = 1500;
-  const CAT_STRONG = "유력", CAT_REVIEW = "확인 필요 – 그 외", CAT_JLK = "확인 필요 – JLK", CAT_OK = "정상";
-  const REVIEW_TAB = "검토 대상";
+  // 분류: 유력 / 확인 필요 / JLK 분석 결과 / 정상 (정상은 화면 탭 없이 숫자로만 표시)
+  const CAT_STRONG = "유력", CAT_REVIEW = "확인 필요", CAT_JLK = "JLK 분석 결과", CAT_OK = "정상";
+  const TABS = [CAT_STRONG, CAT_REVIEW, CAT_JLK];
 
   let entries = [];      // [{file, rel}]
   let perf = null;       // 마지막 점검의 성능 기록
   let results = [];      // 파일별 결과
-  let filter = REVIEW_TAB;
+  let filter = "";
 
   // ---------- 폴더 선택 ----------
 
@@ -334,16 +335,13 @@
   }
 
   function inTab(r, f) {
-    const c = category(r);
-    if (!c) return false;
-    if (f === "전체") return true;
-    if (f === REVIEW_TAB) return c === CAT_STRONG || c === CAT_REVIEW;
-    return c === f;
+    return category(r) === f;
   }
 
   function category(r) {
     if (r.verdict === "유력") return CAT_STRONG;
-    if (r.verdict === "확인 필요") return r.jlk ? CAT_JLK : CAT_REVIEW;
+    if (r.jlk) return CAT_JLK;  // JLK는 OCR 결과(정상/확인 필요)와 상관없이 따로 분류
+    if (r.verdict === "확인 필요") return CAT_REVIEW;
     if (r.verdict === "정상") return CAT_OK;
     return "";
   }
@@ -423,13 +421,7 @@
     }
     await runOcr(fullQueue, "시리즈 전체 OCR 검사 중", 0.6, 1.0);
 
-    // JLK 분석 결과는 '유력'이 아니면 모두 '확인 필요 – JLK'로 분류 (화면에서 일괄 제외 가능)
-    for (const r of results) {
-      if (r.jlk && r.verdict !== "유력") {
-        r.verdict = "확인 필요";
-        if (!r.labels.length) r.labels = ["JLK 분석 결과"];
-      }
-    }
+    // JLK 분석 결과는 OCR 판정(정상/확인 필요)은 그대로 두고, 분류만 'JLK 분석 결과'로 한다 (category 참고)
 
     // 4) 기본 결정: 유력과 읽기 실패만 제외, 나머지(확인 필요 포함)는 업로드
     for (const r of results) {
@@ -593,8 +585,9 @@
       ["OCR 검사", count(r => r.sampled)],
       ["시리즈 대표로 판정", count(r => r.skipped)],
       ["유력", count(r => category(r) === CAT_STRONG)],
-      ["확인 필요 – 그 외", count(r => category(r) === CAT_REVIEW)],
-      ["확인 필요 – JLK", count(r => category(r) === CAT_JLK)],
+      ["확인 필요", count(r => category(r) === CAT_REVIEW)],
+      ["JLK 분석 결과", count(r => category(r) === CAT_JLK)],
+      ["정상", count(r => category(r) === CAT_OK)],
       ["읽기 실패/DICOM 아님", count(r => r.group === "unreadable")],
       ["업로드 예정", count(r => r.decision === "업로드")],
     ];
@@ -614,8 +607,13 @@
     $("step-review").classList.remove("hidden");
     const fbox = $("filters");
     fbox.textContent = "";
-    for (const f of [REVIEW_TAB, CAT_STRONG, CAT_REVIEW, CAT_JLK, CAT_OK, "전체"]) {
+    // 처음에는 파일이 있는 첫 탭을 연다
+    if (!TABS.includes(filter) || !count(r => inTab(r, filter))) {
+      filter = TABS.find(f => count(r => inTab(r, f))) || TABS[0];
+    }
+    for (const f of TABS) {
       const b = document.createElement("button");
+      b.className = "tab";
       b.textContent = `${f} (${count(r => inTab(r, f)).toLocaleString()})`;
       if (f === filter) b.classList.add("active");
       b.addEventListener("click", () => { filter = f; renderReview(); });
@@ -636,6 +634,7 @@
       p.textContent = "표시할 후보가 없습니다.";
       grid.append(p);
     }
+    if (thumbObserver) thumbObserver.disconnect();
     for (const r of shown) grid.append(card(r));
     renderOthers();
   }
@@ -645,18 +644,27 @@
     d.className = "item" + (r.decision === "제외" ? " excluded" : "");
     if (r.thumb) {
       d.append(r.thumb);
+    } else if (r.thumbUrl) {
+      d.append(thumbImg(r.thumbUrl));
     } else {
       const n = document.createElement("div");
       n.className = "noimg";
       n.textContent = r.ocrNote || "썸네일 없음";
       d.append(n);
+      // JLK 탭: 화면에 보이는 카드부터 썸네일을 만든다 (점검 시간에는 영향 없음)
+      if (category(r) === CAT_JLK) watchThumb(n, r);
     }
     const v = document.createElement("div");
     const badge = document.createElement("span");
-    badge.className = "badge " + (VERDICT_CLASS[r.verdict] || "");
-    badge.textContent = r.verdict;
-    badge.textContent = category(r);
-    v.append(badge, r.labels.length ? ` · 발견: ${r.labels.join(", ")}` : "");
+    const cat = category(r);
+    badge.className = "badge " + (cat === CAT_JLK ? "v-jlk" : VERDICT_CLASS[r.verdict] || "");
+    badge.textContent = cat;
+    if (cat === CAT_JLK) {
+      const ocr = r.verdict ? `OCR: ${r.verdict}` + (r.verdict === "확인 필요" && r.labels.length ? ` (${r.labels.join(", ")})` : "") : "OCR: 검사 안 함";
+      v.append(badge, ` · ${ocr}`);
+    } else {
+      v.append(badge, r.labels.length ? ` · 발견: ${r.labels.join(", ")}` : "");
+    }
     const p = document.createElement("div");
     p.className = "path";
     p.textContent = r.rel;
@@ -681,6 +689,45 @@
     }
     d.append(v, p, why, dec);
     return d;
+  }
+
+  // ---------- JLK 썸네일: 카드가 화면에 보일 때 만든다 ----------
+  let thumbObserver = null;
+  const thumbJobs = new WeakMap();
+  function thumbImg(url) {
+    const img = document.createElement("img");
+    img.src = url;
+    img.alt = "썸네일";
+    return img;
+  }
+  function watchThumb(el, r) {
+    if (!("IntersectionObserver" in window)) return;
+    if (!thumbObserver) {
+      thumbObserver = new IntersectionObserver(items => {
+        for (const it of items) {
+          if (!it.isIntersecting) continue;
+          thumbObserver.unobserve(it.target);
+          const job = thumbJobs.get(it.target);
+          if (job) makeThumb(it.target, job);
+        }
+      }, { rootMargin: "300px" });
+    }
+    thumbJobs.set(el, r);
+    thumbObserver.observe(el);
+  }
+  async function makeThumb(el, r) {
+    try {
+      let g = DeidCore.toGray(new Uint8Array(await r.entry.file.arrayBuffer()));
+      if (g.jpeg) g = await decodeJpeg(g);
+      if (g.unsupported) { el.textContent = g.unsupported; return; }
+      const c = grayToCanvas(g, 240);
+      // 메모리를 아끼려고 작은 JPEG로 바꿔 보관
+      const blob = await new Promise(res => c.toBlob(res, "image/jpeg", 0.8));
+      r.thumbUrl = URL.createObjectURL(blob);
+      if (el.isConnected) el.replaceWith(thumbImg(r.thumbUrl));
+    } catch (e) {
+      el.textContent = "썸네일을 만들 수 없음";
+    }
   }
 
   // 지금 보고 있는 탭의 파일을 한 번에 제외/업로드. 유력 파일을 업로드로 바꿀 때는 한 번 더 묻는다
@@ -746,7 +793,7 @@
       "SOP Class", "Modality", "ImageType", "시리즈 번호", "시리즈 설명", "DICM 표시", "비식별화", "OCR 시간(초)"]];
     for (const r of results) {
       const h = r.h || {};
-      rows.push([r.rel, r.decision, category(r), r.group, r.reasons.join("; "), r.labels.join("; "),
+      rows.push([r.rel, r.decision, category(r) || "후보 아님", r.group, r.reasons.join("; "), r.labels.join("; "),
         [r.ocrNote, r.seriesNote].filter(Boolean).join("; "),
         sopName(h), h.modality, (h.imageType || []).join("\\"), h.seriesNumber, h.seriesDescription,
         h.ok ? (h.hasPreamble ? "있음" : "없음") : "", r.anon || "", r.ocrSeconds ? r.ocrSeconds.toFixed(2) : ""]);

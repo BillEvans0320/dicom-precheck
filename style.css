@@ -65,3 +65,18 @@ footer { color: var(--muted); font-size: 12px; padding-bottom: 24px; }
 .result p { margin: 6px 0; }
 .result-title { font-weight: 700; color: var(--ok); font-size: 16px; }
 .result code { word-break: break-all; }
+
+/* 탭: 밑줄 모양 (일괄 버튼과 구분) */
+.tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 16px; border-bottom: 1px solid var(--border); }
+.tabs button.tab { background: none; border: none; border-bottom: 3px solid transparent; border-radius: 0;
+  padding: 8px 14px; color: var(--muted); margin-bottom: -1px; }
+.tabs button.tab.active { color: var(--text); font-weight: 700; border-bottom-color: var(--accent); outline: none; }
+/* 일괄 변경 줄 */
+.bulk { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; background: var(--chip); border-radius: 8px;
+  padding: 8px 12px; margin-top: 10px; }
+.bulk-label { font-weight: 700; font-size: 14px; }
+.btn-exclude { background: var(--card); border: 1.5px solid var(--strong); color: var(--strong); }
+.btn-upload { background: var(--card); border: 1.5px solid var(--ok); color: var(--ok); }
+.bulk.hidden { display: none; }
+.badge.v-jlk { color: var(--accent); }
+.item img { width: 100%; aspect-ratio: 1; background: #000; border-radius: 4px; object-fit: contain; }
