@@ -9,11 +9,22 @@
   const OCR_WORKERS = CPU_CORES <= 4 ? 1 : 2;
   const OCR_BATCH = OCR_WORKERS * 2;
   const VERDICT_CLASS = { "유력": "v-strong", "확인 필요": "v-warn", "정상": "v-ok" };
+  // 시리즈 표본 검사: 시리즈마다 3장(첫·가운데·마지막)만 먼저 OCR하고,
+  // 하나라도 정상이 아니거나 3장의 단어 수가 이만큼 이상 차이 나면 시리즈 전체를 OCR한다
+  const SAMPLE_WORD_GAP = 10;
+  // 2배 확대 재검사: 1차(원래 크기)에서 신뢰 단어가 이만큼 이상 읽혔는데 항목 이름이 없을 때만 (작은 글씨 리포트용).
+  // 글씨가 거의 없는 영상(혈관조영, MIP·VR 등)은 재검사하지 않는다. ECG 리포트는 1차에서 13단어였다.
+  const UPSCALE_MIN_WORDS = 8;
+  // 긴 변(가로·세로 중 큰 쪽)이 이보다 큰 이미지는 글씨도 충분히 커서 2배 확대를 하지 않는다
+  // (큰 리포트 화면의 확대는 시간만 많이 듦)
+  const UPSCALE_MAX_SIDE = 1500;
+  const CAT_STRONG = "유력", CAT_REVIEW = "확인 필요 – 그 외", CAT_JLK = "확인 필요 – JLK", CAT_OK = "정상";
+  const REVIEW_TAB = "검토 대상";
 
   let entries = [];      // [{file, rel}]
   let perf = null;       // 마지막 점검의 성능 기록
   let results = [];      // 파일별 결과
-  let filter = "전체";
+  let filter = REVIEW_TAB;
 
   // ---------- 폴더 선택 ----------
 
@@ -255,15 +266,39 @@
     return t;
   }
 
+  // JPEG로 압축된 영상은 브라우저 기능으로 풀어 회색조로 만든다
+  async function decodeJpeg(g) {
+    const bmp = await createImageBitmap(new Blob([g.jpeg], { type: "image/jpeg" }));
+    const c = document.createElement("canvas");
+    c.width = bmp.width; c.height = bmp.height;
+    const ctx = c.getContext("2d");
+    ctx.drawImage(bmp, 0, 0);
+    const d = ctx.getImageData(0, 0, c.width, c.height).data;
+    const out = new Uint8Array(c.width * c.height);
+    for (let i = 0, j = 0; i < out.length; i++, j += 4) out[i] = 0.299 * d[j] + 0.587 * d[j + 1] + 0.114 * d[j + 2];
+    const img = { width: c.width, height: c.height, data: out };
+    DeidCore.applyOverlays(img, g.overlays);
+    return img;
+  }
+
   async function ocrOne(r) {
+    r.sampled = true;
     const bytes = new Uint8Array(await r.entry.file.arrayBuffer());
-    const gray = DeidCore.toGray(bytes);
+    let gray = DeidCore.toGray(bytes);
+    if (gray.jpeg) {
+      try {
+        gray = await decodeJpeg(gray);
+      } catch (e) {
+        gray = { unsupported: "압축 영상 (브라우저에서 풀 수 없음, 뷰어에서 확인)" };
+      }
+    }
     if (gray.unsupported) {
       r.ocrNote = gray.unsupported;
+      r.wordCount = null;
       if (r.reasons.some(s => s.startsWith("SOP Class: DICOMDIR"))) {
         r.verdict = "유력"; r.labels = ["DICOMDIR"];
       } else {
-        r.verdict = "확인 필요"; r.labels = [];
+        r.verdict = "확인 필요"; r.labels = ["OCR 불가"];
       }
       return;
     }
@@ -278,14 +313,31 @@
     // 1차: 원래 크기 (큰 글씨는 여기서 바로 잡힘, 글씨가 없는 영상도 여기서 끝남)
     let j = await recognize(false);
     r.ocrPasses = 1;
-    // 2차: 2배 확대 (작은 글씨용). 글씨는 있는데 항목 이름이 안 잡혔거나, 보고서형 SOP인데 유력이 아닐 때만
-    if (j.verdict !== "유력" && (j.verdict === "확인 필요" || r.group === "primary")) {
+    // 2차: 2배 확대 (작은 글씨용). 1차가 확인 필요이거나, 글씨는 꽤 있는데 항목 이름이 안 잡혔을 때만
+    if (j.verdict !== "유력" && Math.max(gray.width, gray.height) < UPSCALE_MAX_SIDE &&
+        (j.verdict === "확인 필요" || j.wordCount >= UPSCALE_MIN_WORDS)) {
       const j2 = await recognize(true);
       r.ocrPasses = 2;
       if (j2.verdict === "유력" || j2.wordCount > j.wordCount) j = j2;
     }
     r.verdict = j.verdict; r.labels = j.labels; r.wordCount = j.wordCount;
+    r.ocrDone = true;
     r.ocrSeconds = (performance.now() - t0) / 1000;
+  }
+
+  async function runOcr(list, label, from, to) {
+    for (let i = 0; i < list.length; i += OCR_BATCH) {
+      await Promise.all(list.slice(i, i + OCR_BATCH).map(ocrOne));
+      const n = Math.min(list.length, i + OCR_BATCH);
+      progress(from + (to - from) * n / list.length, `${label} ${n} / ${list.length}`);
+    }
+  }
+
+  function category(r) {
+    if (r.verdict === "유력") return CAT_STRONG;
+    if (r.verdict === "확인 필요") return r.jlk ? CAT_JLK : CAT_REVIEW;
+    if (r.verdict === "정상") return CAT_OK;
+    return "";
   }
 
   $("run").addEventListener("click", async () => {
@@ -308,7 +360,7 @@
     // 2) 후보 선정
     const cls = DeidCore.classifyAll(headers);
     results = entries.map((entry, i) => ({
-      entry, rel: entry.rel, h: headers[i], group: cls[i].group, reasons: cls[i].reasons,
+      idx: i, entry, rel: entry.rel, h: headers[i], group: cls[i].group, reasons: cls[i].reasons, jlk: cls[i].jlk,
       verdict: "", labels: [], decision: "", ocrNote: "",
     }));
     if ($("opt-series-ocr").checked) {
@@ -322,32 +374,73 @@
       }
     }
 
-    // 3) 후보 OCR
-    const queue = results.filter(r => r.group === "primary" || r.group === "clue" || r.group === "sample");
-    let ocrDone = 0;
+    // 3) 후보 OCR: 시리즈 표본 검사
+    const cands = results.filter(r => r.group === "primary" || r.group === "clue" || r.group === "sample");
+    const bySeries = new Map();
+    for (const r of cands) {
+      const key = (r.h.studyUID || "") + "|" + (r.h.seriesUID || r.rel.split("/").slice(0, -1).join("/"));
+      if (!bySeries.has(key)) bySeries.set(key, []);
+      bySeries.get(key).push(r);
+    }
+    const seriesList = [];
+    const samples = [];
+    for (const list of bySeries.values()) {
+      list.sort((a, b) => ((a.h.instanceNumber || 0) - (b.h.instanceNumber || 0)) || a.rel.localeCompare(b.rel));
+      const n = list.length;
+      const samp = n >= 3 ? [list[0], list[n >> 1], list[n - 1]] : list.slice();
+      seriesList.push({ list, samp });
+      samples.push(...samp);
+    }
     const tOcr0 = performance.now();
-    for (let i = 0; i < queue.length; i += OCR_BATCH) {
-      await Promise.all(queue.slice(i, i + OCR_BATCH).map(ocrOne));
-      ocrDone = Math.min(queue.length, i + OCR_BATCH);
-      progress(0.3 + 0.7 * ocrDone / queue.length, `후보 OCR 검사 중 ${ocrDone} / ${queue.length}`);
+    await runOcr(samples, "표본 OCR 검사 중 (시리즈마다 최대 3장)", 0.3, 0.6);
+    const fullQueue = [];
+    let fullSeries = 0;
+    for (const s of seriesList) {
+      const rest = s.list.filter(r => !r.sampled);
+      if (!rest.length) continue;
+      const found = s.samp.some(r => r.verdict !== "정상");
+      const wcs = s.samp.map(r => r.wordCount).filter(v => v != null);
+      const gap = wcs.length > 1 ? Math.max(...wcs) - Math.min(...wcs) : 0;
+      if (found || gap >= SAMPLE_WORD_GAP) {
+        fullSeries++;
+        const why = found ? "표본에서 발견되어 시리즈 전체 검사" : "표본의 글자 양이 달라 시리즈 전체 검사";
+        for (const r of rest) { r.seriesNote = why; fullQueue.push(r); }
+        for (const r of s.samp) r.seriesNote = why;
+      } else {
+        for (const r of rest) {
+          r.verdict = "정상"; r.labels = []; r.skipped = true;
+          r.ocrNote = "표본 검사로 정상 (같은 시리즈 3장 확인, OCR 생략)";
+        }
+      }
+    }
+    await runOcr(fullQueue, "시리즈 전체 OCR 검사 중", 0.6, 1.0);
+
+    // JLK 분석 결과는 '유력'이 아니면 모두 '확인 필요 – JLK'로 분류 (화면에서 일괄 제외 가능)
+    for (const r of results) {
+      if (r.jlk && r.verdict !== "유력") {
+        r.verdict = "확인 필요";
+        if (!r.labels.length) r.labels = ["JLK 분석 결과"];
+      }
     }
 
-    // 4) 기본 결정
+    // 4) 기본 결정: 유력과 읽기 실패만 제외, 나머지(확인 필요 포함)는 업로드
     for (const r of results) {
-      if (r.group === "unreadable") { r.decision = "제외"; continue; }
-      if (!r.verdict) { r.decision = "업로드"; continue; }
-      r.decision = r.verdict === "정상" ? "업로드" : "제외";
+      r.decision = (r.group === "unreadable" || r.verdict === "유력") ? "제외" : "업로드";
     }
     const total = (performance.now() - t0) / 1000;
     const tOcr = (performance.now() - tOcr0) / 1000 - engineSeconds;
     const twoPass = count(r => r.ocrPasses === 2);
+    const ocrCount = count(r => r.sampled);
+    const skipped = count(r => r.skipped);
     // 성능 기록 (VMware 등 실제 환경 테스트용)
     perf = {
-      files: results.length, cores: CPU_CORES, workers: OCR_WORKERS, ocrCount: queue.length, twoPass,
+      files: results.length, cores: CPU_CORES, workers: OCR_WORKERS, ocrCount, twoPass, skipped, fullSeries,
+      candidates: cands.length, series: seriesList.length,
       scanSec: tScan, engineSec: engineSeconds, ocrSec: Math.max(0, tOcr), totalSec: total,
     };
     progress(1, `완료 · 파일 ${results.length.toLocaleString()}개 · 헤더 스캔 ${tScan.toFixed(1)}초` +
-      (queue.length ? ` · OCR 후보 ${queue.length}장 ${perf.ocrSec.toFixed(1)}초 (장당 ${(perf.ocrSec / queue.length).toFixed(1)}초, 2배 확대 재검사 ${twoPass}장)` +
+      (cands.length ? ` · 후보 ${cands.length.toLocaleString()}장(시리즈 ${seriesList.length}개) 중 OCR ${ocrCount}장, 표본 검사로 생략 ${skipped.toLocaleString()}장` +
+        ` (전체 검사 시리즈 ${fullSeries}개) · OCR ${perf.ocrSec.toFixed(1)}초 (장당 ${ocrCount ? (perf.ocrSec / ocrCount).toFixed(1) : 0}초, 2배 확대 재검사 ${twoPass}장)` +
         ` · OCR 엔진 준비 ${engineSeconds.toFixed(1)}초` : " · OCR 후보 없음") +
       ` · 전체 ${total.toFixed(1)}초 · CPU ${CPU_CORES}코어, OCR 작업 ${OCR_WORKERS}개`);
     renderSummary();
@@ -489,9 +582,11 @@
   function renderSummary() {
     const stats = [
       ["전체 파일", results.length],
-      ["OCR 검사한 후보", count(r => r.verdict)],
-      ["유력", count(r => r.verdict === "유력")],
-      ["확인 필요", count(r => r.verdict === "확인 필요")],
+      ["OCR 검사", count(r => r.sampled)],
+      ["표본 검사로 생략", count(r => r.skipped)],
+      ["유력", count(r => category(r) === CAT_STRONG)],
+      ["확인 필요 – 그 외", count(r => category(r) === CAT_REVIEW)],
+      ["확인 필요 – JLK", count(r => category(r) === CAT_JLK)],
       ["읽기 실패/DICOM 아님", count(r => r.group === "unreadable")],
       ["업로드 예정", count(r => r.decision === "업로드")],
     ];
@@ -511,17 +606,28 @@
     $("step-review").classList.remove("hidden");
     const fbox = $("filters");
     fbox.textContent = "";
-    for (const f of ["전체", "유력", "확인 필요", "정상"]) {
+    const inTab = (r, f) => {
+      const c = category(r);
+      if (!c) return false;
+      if (f === "전체") return true;
+      if (f === REVIEW_TAB) return c === CAT_STRONG || c === CAT_REVIEW;
+      return c === f;
+    };
+    for (const f of [REVIEW_TAB, CAT_STRONG, CAT_REVIEW, CAT_JLK, CAT_OK, "전체"]) {
       const b = document.createElement("button");
-      b.textContent = `${f} (${f === "전체" ? count(r => r.verdict) : count(r => r.verdict === f)})`;
+      b.textContent = `${f} (${count(r => inTab(r, f)).toLocaleString()})`;
       if (f === filter) b.classList.add("active");
       b.addEventListener("click", () => { filter = f; renderReview(); });
       fbox.append(b);
     }
+    // JLK 탭: 일괄 제외 / 일괄 업로드
+    const bulk = $("jlk-bulk");
+    bulk.classList.toggle("hidden", filter !== CAT_JLK || !count(r => category(r) === CAT_JLK));
+    $("jlk-count").textContent = count(r => category(r) === CAT_JLK && r.decision === "제외").toLocaleString();
 
     const grid = $("grid");
     grid.textContent = "";
-    const shown = results.filter(r => r.verdict && (filter === "전체" || r.verdict === filter));
+    const shown = results.filter(r => inTab(r, filter));
     if (!shown.length) {
       const p = document.createElement("p");
       p.className = "muted";
@@ -547,20 +653,21 @@
     const badge = document.createElement("span");
     badge.className = "badge " + (VERDICT_CLASS[r.verdict] || "");
     badge.textContent = r.verdict;
+    badge.textContent = category(r);
     v.append(badge, r.labels.length ? ` · 발견: ${r.labels.join(", ")}` : "");
     const p = document.createElement("div");
     p.className = "path";
     p.textContent = r.rel;
     const why = document.createElement("div");
     why.className = "reasons";
-    why.textContent = r.reasons.join(" · ") + (r.ocrNote ? ` · ${r.ocrNote}` : "");
+    why.textContent = r.reasons.join(" · ") + (r.ocrNote ? ` · ${r.ocrNote}` : "") + (r.seriesNote ? ` · ${r.seriesNote}` : "");
     const dec = document.createElement("div");
     dec.className = "decide";
     for (const opt of ["제외", "업로드"]) {
       const l = document.createElement("label");
       const inp = document.createElement("input");
       inp.type = "radio";
-      inp.name = "d-" + results.indexOf(r);
+      inp.name = "d-" + r.idx;
       inp.checked = r.decision === opt;
       inp.addEventListener("change", () => {
         r.decision = opt;
@@ -573,6 +680,14 @@
     d.append(v, p, why, dec);
     return d;
   }
+
+  function setJlk(decision) {
+    for (const r of results) if (category(r) === CAT_JLK) r.decision = decision;
+    renderSummary();
+    renderReview();
+  }
+  $("jlk-exclude").addEventListener("click", () => setJlk("제외"));
+  $("jlk-upload").addEventListener("click", () => setJlk("업로드"));
 
   function renderOthers() {
     const box = $("others");
@@ -620,18 +735,20 @@
   const sopName = h => (h && h.ok ? DeidCore.sopLabel(h.sopClassUID) || h.sopClassUID : "");
 
   $("dl-files").addEventListener("click", () => {
-    const rows = [["파일", "최종 결정", "후보 구분", "이유", "OCR 판정", "발견한 항목 이름", "OCR 비고",
+    const rows = [["파일", "최종 결정", "분류", "후보 구분", "이유", "발견한 항목 이름", "OCR 비고",
       "SOP Class", "Modality", "ImageType", "시리즈 번호", "시리즈 설명", "DICM 표시", "비식별화", "OCR 시간(초)"]];
     for (const r of results) {
       const h = r.h || {};
-      rows.push([r.rel, r.decision, r.group, r.reasons.join("; "), r.verdict, r.labels.join("; "), r.ocrNote,
+      rows.push([r.rel, r.decision, category(r), r.group, r.reasons.join("; "), r.labels.join("; "),
+        [r.ocrNote, r.seriesNote].filter(Boolean).join("; "),
         sopName(h), h.modality, (h.imageType || []).join("\\"), h.seriesNumber, h.seriesDescription,
         h.ok ? (h.hasPreamble ? "있음" : "없음") : "", r.anon || "", r.ocrSeconds ? r.ocrSeconds.toFixed(2) : ""]);
     }
     if (perf) {
       rows.push([]);
       rows.push(["# 성능 기록", `파일 ${perf.files}개`, `CPU ${perf.cores}코어`, `OCR 작업 ${perf.workers}개`,
-        `OCR 후보 ${perf.ocrCount}장`, `2배 확대 재검사 ${perf.twoPass}장`, `헤더 스캔 ${perf.scanSec.toFixed(1)}초`,
+        `후보 ${perf.candidates}장(시리즈 ${perf.series}개)`, `OCR ${perf.ocrCount}장`, `표본 검사로 생략 ${perf.skipped}장`,
+        `전체 검사 시리즈 ${perf.fullSeries}개`, `2배 확대 재검사 ${perf.twoPass}장`, `헤더 스캔 ${perf.scanSec.toFixed(1)}초`,
         `OCR 엔진 준비 ${perf.engineSec.toFixed(1)}초`, `OCR ${perf.ocrSec.toFixed(1)}초`, `전체 ${perf.totalSec.toFixed(1)}초`]);
     }
     download(`precheck_files_${stamp()}.csv`, csv(rows));

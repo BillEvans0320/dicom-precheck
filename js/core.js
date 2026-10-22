@@ -114,6 +114,8 @@
       seriesNumber: str(ds, "x00200011"),
       seriesDescription: str(ds, "x0008103e"),
       studyUID: str(ds, "x0020000d"),
+      manufacturer: str(ds, "x00080070"),
+      instanceNumber: parseInt(str(ds, "x00200013"), 10),
       samplesPerPixel: u16(ds, "x00280002"),
       photometric: str(ds, "x00280004").toUpperCase(),
       rows: u16(ds, "x00280010"),
@@ -144,8 +146,10 @@
   // 후보는 최소로 잡는다: 일반 CT·MR 영상과 재구성 영상(MPR, MIP, 3D 등)은 OCR하지 않는다.
   // (ImageType SECONDARY, 큰 시리즈 번호, 장수가 적은 시리즈, 컬러 영상은 정상 재구성 영상도 해당되어 기준에서 뺐다)
   function classify(h) {
-    if (!h || !h.ok) return { group: "unreadable", reasons: ["DICOM 아님/읽기 실패"] };
+    if (!h || !h.ok) return { group: "unreadable", reasons: ["DICOM 아님/읽기 실패"], jlk: false };
     const reasons = [];
+    const jlk = isJLK(h);
+    if (jlk) reasons.push("JLK 분석 결과");
     const label = sopLabel(h.sopClassUID);
     if (label) reasons.push(`SOP Class: ${label}`);
     const clue = [];
@@ -155,7 +159,12 @@
     reasons.push(...clue);
     if (!h.hasPreamble) reasons.push("DICM 표시 없음");
     const group = label ? "primary" : clue.length ? "clue" : "none";
-    return { group, reasons };
+    return { group, reasons, jlk };
+  }
+
+  /** JLK 분석 결과물: 헤더의 제조사(Manufacturer)가 JLK이거나 시리즈 설명에 JLK가 있는 파일 */
+  function isJLK(h) {
+    return /^\s*JLK/i.test(h.manufacturer || "") || /JLK/i.test(h.seriesDescription || "");
   }
 
   // ---------- 픽셀 → 회색조 ----------
@@ -163,8 +172,11 @@
   const UNCOMPRESSED_LE = new Set(["1.2.840.10008.1.2", "1.2.840.10008.1.2.1"]);
 
   /**
-   * 파일 전체 bytes에서 첫 프레임을 8비트 회색조로 만든다. 비압축 little endian만 지원.
-   * 반환: {width, height, data(Uint8Array)} 또는 {unsupported: 이유}
+   * 파일 전체 bytes에서 첫 프레임을 8비트 회색조로 만든다. 비압축 little endian을 직접 읽는다.
+   * 오버레이(6000~601E 그룹)에 글씨가 있으면 이미지에 합친다.
+   * JPEG로 압축된 경우(헤더가 '비압축'으로 잘못 기록된 경우 포함)는 {jpeg: JPEG 데이터}를 돌려주고,
+   * 화면 쪽(app.js)에서 브라우저 기능으로 푼다.
+   * 반환: {width, height, data(Uint8Array)} | {jpeg, overlays} | {unsupported: 이유}
    */
   function toGray(bytes) {
     let parsed;
@@ -178,8 +190,19 @@
     const pix = ds.elements[PIXEL_TAG];
     if (!pix) return { unsupported: "영상 데이터 없음" };
     const ts = str(ds, "x00020010") || parsed.assumedTs || "1.2.840.10008.1.2";
-    if (pix.encapsulatedPixelData || !UNCOMPRESSED_LE.has(ts)) return { unsupported: "압축 영상 (뷰어에서 확인)" };
     const rows = u16(ds, "x00280010"), cols = u16(ds, "x00280011");
+    const overlays = readOverlays(ds, bytes);
+
+    // 압축 데이터: JPEG 조각을 꺼낸다 (헤더가 비압축이라고 되어 있어도 실제 데이터가 조각 형식인 경우 포함)
+    const looksEncapsulated = pix.encapsulatedPixelData ||
+      (bytes[pix.dataOffset] === 0xfe && bytes[pix.dataOffset + 1] === 0xff &&
+       bytes[pix.dataOffset + 2] === 0x00 && bytes[pix.dataOffset + 3] === 0xe0);
+    if (looksEncapsulated || !UNCOMPRESSED_LE.has(ts)) {
+      const jpeg = looksEncapsulated ? firstFrameFragments(ds, pix, bytes) : null;
+      if (jpeg && jpeg[0] === 0xff && jpeg[1] === 0xd8) return { jpeg, overlays, width: cols, height: rows };
+      return { unsupported: "압축 영상 (뷰어에서 확인)" };
+    }
+
     const spp = u16(ds, "x00280002") || 1;
     const bits = u16(ds, "x00280100") || 8;
     const signed = u16(ds, "x00280103") === 1;
@@ -216,7 +239,72 @@
       const v = (vals[i] - lo) * scale;
       data[i] = mono1 ? 255 - v : v;
     }
-    return { width: cols, height: rows, data };
+    const img = { width: cols, height: rows, data };
+    applyOverlays(img, overlays);
+    return img;
+  }
+
+  /** 압축 데이터의 첫 프레임 바이트 (조각을 이어 붙임). 기본 오프셋 표(첫 항목)는 건너뛴다 */
+  function firstFrameFragments(ds, pix, bytes) {
+    const frames = parseInt(str(ds, "x00280008"), 10) || 1;
+    const end = pix.length && pix.length !== UNDEFINED_LENGTH ? pix.dataOffset + pix.length : bytes.length;
+    const frags = [];
+    let p = pix.dataOffset, first = true;
+    while (p + 8 <= end) {
+      const g = bytes[p] | (bytes[p + 1] << 8), e = bytes[p + 2] | (bytes[p + 3] << 8);
+      const len = (bytes[p + 4] | (bytes[p + 5] << 8) | (bytes[p + 6] << 16) | (bytes[p + 7] << 24)) >>> 0;
+      if (g !== 0xfffe || e !== 0xe000) break;  // 항목 끝(E0DD) 또는 구조 이상
+      p += 8;
+      if (!first) frags.push(bytes.subarray(p, Math.min(p + len, bytes.length)));
+      first = false;
+      p += len;
+      if (frames > 1 && frags.length) break;  // 여러 프레임이면 첫 조각(첫 프레임)만
+    }
+    if (!frags.length) return null;
+    const total = frags.reduce((a, f) => a + f.length, 0);
+    const out = new Uint8Array(total);
+    let q = 0;
+    for (const f of frags) { out.set(f, q); q += f.length; }
+    return out;
+  }
+
+  /** 오버레이 층(60xx,3000)을 읽는다. 1비트 = 1픽셀, 바이트 안에서 낮은 비트부터 */
+  function readOverlays(ds, bytes) {
+    const out = [];
+    for (let g = 0x6000; g <= 0x601e; g += 2) {
+      const hex = g.toString(16);
+      const data = ds.elements["x" + hex + "3000"];
+      if (!data || !data.length || data.length === UNDEFINED_LENGTH) continue;
+      const rows = u16(ds, "x" + hex + "0010"), cols = u16(ds, "x" + hex + "0011");
+      if (!rows || !cols) continue;
+      let r0 = 1, c0 = 1;
+      try {
+        r0 = ds.int16("x" + hex + "0050", 0) || 1;
+        c0 = ds.int16("x" + hex + "0050", 1) || 1;
+      } catch (e) { /* 기본값 1,1 */ }
+      out.push({ rows, cols, r0, c0, bits: bytes.subarray(data.dataOffset, data.dataOffset + data.length) });
+    }
+    return out;
+  }
+
+  /** 오버레이 글씨를 이미지에 합친다: 어두운 이미지면 흰색, 밝은 이미지면 검은색으로 */
+  function applyOverlays(img, overlays) {
+    if (!overlays || !overlays.length) return;
+    let sum = 0;
+    for (let i = 0; i < img.data.length; i++) sum += img.data[i];
+    const ink = sum / img.data.length < 128 ? 255 : 0;
+    for (const o of overlays) {
+      for (let y = 0; y < o.rows; y++) {
+        const iy = y + o.r0 - 1;
+        if (iy < 0 || iy >= img.height) continue;
+        for (let x = 0; x < o.cols; x++) {
+          const ix = x + o.c0 - 1;
+          if (ix < 0 || ix >= img.width) continue;
+          const k = y * o.cols + x;
+          if (o.bits[k >> 3] & (1 << (k & 7))) img.data[iy * img.width + ix] = ink;
+        }
+      }
+    }
   }
 
   /** OCR 전처리: 어두운 배경이면 밝기 반전, 폭이 upscaleBelow(px) 미만이면 2배 확대 */
@@ -258,15 +346,41 @@
     ["생년월일/주민번호", /생\s*년\s*월\s*일|주\s*민/],
   ];
 
+  // 환자정보와 함께 자주 쓰이는 보조 항목 이름 (있으면 '확인 필요')
+  const WEAK_LABELS = [
+    ["Sex", /\bsex\b/i],
+    ["Age", /\bage\b/i],
+    ["Accession", /\baccession\b/i],
+    ["Exam No", /\bexam\s*(no|#|number)\b/i],
+    ["Physician", /\bphysician\b/i],
+    ["Operator", /\boperator\b/i],
+    ["Ward", /\bward\b/i],
+    ["Hospital", /\bhospital\b/i],
+    ["Institution", /\binstitution\b/i],
+    ["Referring", /\breferring\b/i],
+    ["성별/나이", /성\s*별|나\s*이/],
+    ["병원/의사", /병\s*원|의\s*사/],
+  ];
+  const MIN_CONFIDENCE = 60;                       // OCR 신뢰도 60점 미만 단어는 판정에 쓰지 않음
+  const LONG_NUMBER = /(?<![\d.])\d{7,}(?![\d.])/;  // 7자리 이상 숫자 (등록번호 형태)
+
   /**
-   * text: OCR 전체 글자, words: [{text, confidence}]
-   * 반환: {verdict: "유력"|"확인 필요"|"정상", labels: [...], wordCount}
+   * words: [{text, confidence}] (Tesseract 단어 목록)
+   * 유력: 강한 항목 이름(Name, Patient ID 등)이 보임
+   * 확인 필요: 보조 항목 이름(Sex, Physician 등)이나 7자리 이상 숫자가 보임
+   * 정상: 그 외 (장비 문구, 각도, 단위 등만 있음)
+   * 반환: {verdict, labels, wordCount}
    */
   function judgeOcr(text, words) {
-    const labels = STRONG_LABELS.filter(([, re]) => re.test(text)).map(([n]) => n);
-    const solid = (words || []).filter(w => w.confidence >= 60 && /[A-Za-z가-힣0-9]{3,}/.test(w.text)).length;
-    const verdict = labels.length ? "유력" : solid >= 3 ? "확인 필요" : "정상";
-    return { verdict, labels, wordCount: solid };
+    const sure = (words || []).filter(w => w.confidence >= MIN_CONFIDENCE);
+    const sureText = sure.map(w => w.text).join(" ");
+    const wordCount = sure.filter(w => /[A-Za-z가-힣0-9]{3,}/.test(w.text)).length;
+    const strong = STRONG_LABELS.filter(([, re]) => re.test(sureText)).map(([n]) => n);
+    if (strong.length) return { verdict: "유력", labels: strong, wordCount };
+    const weak = WEAK_LABELS.filter(([, re]) => re.test(sureText)).map(([n]) => n);
+    if (LONG_NUMBER.test(sureText)) weak.push("7자리 이상 숫자");
+    if (weak.length) return { verdict: "확인 필요", labels: weak, wordCount };
+    return { verdict: "정상", labels: [], wordCount };
   }
 
   /** Tesseract.js 결과(data)에서 단어 목록 추출 */
@@ -371,6 +485,6 @@
     return { ok: remaining.size === 0, remaining: [...remaining] };
   }
 
-  return { readHeader, classifyAll, classify, toGray, prepareForOcr, judgeOcr, wordsFromTesseract, sopLabel,
-           anonymize, verifyAnonymized, ANON_TAGS };
+  return { readHeader, classifyAll, classify, isJLK, toGray, applyOverlays, prepareForOcr, judgeOcr,
+           wordsFromTesseract, sopLabel, anonymize, verifyAnonymized, ANON_TAGS };
 });
